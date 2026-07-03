@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a signed-NDA PDF and email it to the founder.
+"""Generate the signed JetsetterPro NDA as a PDF and email it to the founder.
 
-Pulls an NDA signature record captured by the storydoc (POST /api/nda),
-renders it as a one-page acknowledgment form — signer details plus the
-drawn signature image — and emails the PDF as an attachment.
+Reproduces the full Confidentiality & Non-Disclosure Agreement shown in the
+storydoc's NDA gate (app/Storydoc.jsx), filled in with a captured signature
+record — recipient details, drawn signature image, and an audit trail — so the
+founder has a complete executed copy for their records.
 
 Data sources (pick one):
   * Local SQLite file written in dev:      data/signatures.sqlite   (default)
@@ -16,7 +17,7 @@ Examples:
 
   # Signature id 3 from the deployed app, emailed to the default recipient
   NDA_ADMIN_KEY=... SMTP_HOST=smtp.gmail.com SMTP_USER=me@example.com SMTP_PASS=... \
-      python scripts/email_nda_pdf.py --api-url https://jetsetterpro.vercel.app --id 3
+      python scripts/email_nda_pdf.py --api-url https://jetstterpro-storydoc.vercel.app --id 3
 
 SMTP configuration comes from the environment:
   SMTP_HOST (required to send), SMTP_PORT (default 587),
@@ -40,10 +41,13 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
+from reportlab.platypus import (HRFlowable, Image, Paragraph, SimpleDocTemplate,
+                                Spacer, Table, TableStyle)
 
 DEFAULT_RECIPIENT = "jamil@trainovations.com"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -54,10 +58,81 @@ FIELDS = (
     "signature_png", "doc_version", "ip", "user_agent", "signed_at",
 )
 
+# ---------------------------------------------------------------------------
+# NDA text — mirrors the agreement presented in the storydoc's NDA gate
+# (app/Storydoc.jsx). Keep the two in sync if the terms ever change.
+# ---------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------
+NDA_TITLE = "Confidentiality & Non-Disclosure Agreement"
+
+NDA_PREAMBLE = (
+    'This Confidentiality and Non-Disclosure Agreement (the "Agreement") is '
+    'entered into as of the date of electronic signature below (the '
+    '"Effective Date") by and between <b>Trainovate Technologies LLC</b>, a '
+    'Nevada limited liability company ("Discloser"), and the individual or '
+    'entity identified below ("Recipient").'
+)
+
+NDA_SECTIONS = (
+    ("1. Purpose.",
+     'Discloser has developed a mobile travel-technology product known as '
+     '"JetSetter Pro." Recipient wishes to review Confidential Information '
+     'solely to evaluate a potential investment in, or business relationship '
+     'with, Discloser (the "Purpose").'),
+    ("2. Confidential Information.",
+     '"Confidential Information" means all non-public information disclosed '
+     'by Discloser in any form, including product designs, source code, '
+     'roadmaps, financial models, unit economics, market analyses, supplier '
+     'and API relationships, and the contents of this presentation.'),
+    ("3. Obligations.",
+     "Recipient shall (a) use Confidential Information solely for the "
+     "Purpose; (b) not disclose it to any third party without Discloser's "
+     "prior written consent; and (c) protect it with at least the degree of "
+     "care used for Recipient's own confidential information, and no less "
+     "than reasonable care."),
+    ("4. Exclusions.",
+     "Confidential Information does not include information that (a) is or "
+     "becomes publicly available through no fault of Recipient; (b) was "
+     "rightfully known to Recipient before disclosure; (c) is independently "
+     "developed without use of Confidential Information; or (d) is rightfully "
+     "received from a third party without restriction."),
+    ("5. Compelled Disclosure.",
+     "Recipient may disclose Confidential Information to the extent required "
+     "by law, provided Recipient gives Discloser prompt notice (where lawful) "
+     "and reasonable cooperation to seek protective treatment."),
+    ("6. No License.",
+     "No license, ownership or other intellectual-property right is granted "
+     "by this Agreement or by any disclosure."),
+    ("7. No Obligation.",
+     "Nothing in this Agreement obligates either party to proceed with any "
+     "investment or transaction."),
+    ("8. Term.",
+     "Recipient's obligations survive for three (3) years from the Effective "
+     "Date; trade secrets remain protected for as long as they remain trade "
+     "secrets under applicable law."),
+    ("9. Return or Destruction.",
+     "Upon Discloser's written request, Recipient shall promptly return or "
+     "destroy all Confidential Information and certify destruction on "
+     "request."),
+    ("10. Remedies.",
+     "Unauthorized disclosure may cause irreparable harm for which monetary "
+     "damages are inadequate; Discloser is entitled to seek injunctive relief "
+     "in addition to all other remedies at law or in equity."),
+    ("11. Governing Law; Venue.",
+     "This Agreement is governed by the laws of the State of Nevada, without "
+     "regard to conflict-of-laws rules. Exclusive venue lies in the state and "
+     "federal courts located in Clark County, Nevada."),
+    ("12. Electronic Signature.",
+     "Recipient consents to transacting electronically. Recipient's typed "
+     "name and drawn signature below constitute a valid electronic signature "
+     "under the U.S. E-SIGN Act and Nevada UETA (NRS Chapter 719) and bind "
+     "Recipient to this Agreement."),
+)
+
+
+# ---------------------------------------------------------------------------
 # Data access
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def fetch_from_sqlite(db_path, sig_id=None):
     if not Path(db_path).exists():
@@ -98,104 +173,125 @@ def fetch_from_api(api_url, admin_key, sig_id=None):
     return signatures[0]  # API returns newest first
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # PDF generation
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+INK = colors.HexColor("#14171F")
+MUTED = colors.HexColor("#5A6072")
+RULE = colors.HexColor("#C9CDD8")
+
+STYLES = {
+    "title": ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=17,
+                            leading=21, textColor=INK, alignment=TA_CENTER),
+    "subtitle": ParagraphStyle("subtitle", fontName="Helvetica", fontSize=9.5,
+                               leading=13, textColor=MUTED, alignment=TA_CENTER),
+    "body": ParagraphStyle("body", fontName="Helvetica", fontSize=9.5,
+                           leading=14.5, textColor=INK, spaceAfter=7),
+    "label": ParagraphStyle("label", fontName="Helvetica-Bold", fontSize=7.5,
+                            leading=10, textColor=MUTED),
+    "value": ParagraphStyle("value", fontName="Helvetica", fontSize=10,
+                            leading=13, textColor=INK),
+    "fine": ParagraphStyle("fine", fontName="Helvetica", fontSize=7.5,
+                           leading=10.5, textColor=MUTED),
+}
+
+
+def esc(value):
+    text = str(value if value not in (None, "") else "—")
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def signature_flowable(sig, max_w=2.9 * inch, max_h=1.0 * inch):
+    """Return an Image flowable of the drawn signature, or a placeholder Paragraph."""
+    data_url = sig.get("signature_png") or ""
+    prefix = "data:image/png;base64,"
+    if not data_url.startswith(prefix):
+        return Paragraph("(no drawn signature on record)", STYLES["fine"])
+    png = io.BytesIO(base64.b64decode(data_url[len(prefix):]))
+    iw, ih = ImageReader(png).getSize()
+    png.seek(0)
+    scale = min(max_w / iw, max_h / ih, 1.0)
+    return Image(png, width=iw * scale, height=ih * scale)
+
 
 def build_pdf(sig, out_path):
-    page_w, page_h = LETTER
-    margin = 0.9 * inch
-    c = canvas.Canvas(str(out_path), pagesize=LETTER)
-    c.setTitle(f"JetsetterPro NDA — {sig.get('full_name', '')}")
-
-    # Header band
-    c.setFillColor(colors.HexColor("#0B0E17"))
-    c.rect(0, page_h - 1.5 * inch, page_w, 1.5 * inch, stroke=0, fill=1)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(margin, page_h - 0.85 * inch, "Mutual Non-Disclosure Acknowledgment")
-    c.setFont("Helvetica", 11)
-    c.setFillColor(colors.HexColor("#8B92A8"))
-    c.drawString(margin, page_h - 1.15 * inch,
-                 f"JetsetterPro Storydoc · {sig.get('doc_version') or 'JSP-NDA-1.0'}")
-
-    y = page_h - 2.1 * inch
-
-    c.setFillColor(colors.black)
-    c.setFont("Helvetica", 10.5)
-    intro = (
-        "The undersigned acknowledges electronically signing the JetsetterPro",
-        "confidentiality agreement presented in the investor storydoc, and agrees to",
-        "hold in confidence all non-public material disclosed beyond the NDA gate.",
+    doc = SimpleDocTemplate(
+        str(out_path), pagesize=LETTER,
+        leftMargin=0.95 * inch, rightMargin=0.95 * inch,
+        topMargin=0.8 * inch, bottomMargin=0.75 * inch,
+        title=f"JetsetterPro NDA — {sig.get('full_name', '')}",
     )
-    for line in intro:
-        c.drawString(margin, y, line)
-        y -= 15
-    y -= 14
 
-    # Signer details table
-    rows = (
-        ("Full name", sig.get("full_name")),
-        ("Email", sig.get("email")),
-        ("Company", sig.get("company")),
-        ("Title", sig.get("title")),
-        ("Typed signature", sig.get("typed_signature")),
-        ("Document version", sig.get("doc_version")),
-        ("Signed at (UTC)", sig.get("signed_at")),
-        ("IP address", sig.get("ip")),
-        ("Record ID", sig.get("id")),
+    signed_date = (sig.get("signed_at") or "")[:10]
+    story = [
+        Paragraph("TRAINOVATE TECHNOLOGIES LLC · JETSETTER PRO", STYLES["subtitle"]),
+        Spacer(1, 6),
+        Paragraph(NDA_TITLE, STYLES["title"]),
+        Spacer(1, 4),
+        Paragraph(f"Effective date: {esc(signed_date)} · "
+                  f"{esc(sig.get('doc_version') or 'JSP-NDA-1.0')} · "
+                  f"Executed electronically via the JetsetterPro storydoc",
+                  STYLES["subtitle"]),
+        Spacer(1, 10),
+        HRFlowable(width="100%", thickness=0.8, color=RULE),
+        Spacer(1, 12),
+        Paragraph(NDA_PREAMBLE, STYLES["body"]),
+    ]
+    for heading, text in NDA_SECTIONS:
+        story.append(Paragraph(f"<b>{heading}</b> {esc(text)}", STYLES["body"]))
+
+    # Signature block
+    story += [Spacer(1, 10),
+              HRFlowable(width="100%", thickness=0.8, color=RULE),
+              Spacer(1, 12),
+              Paragraph("<b>AGREED AND ACCEPTED — RECIPIENT</b>", STYLES["label"]),
+              Spacer(1, 8)]
+
+    def cell(label, value):
+        return [Paragraph(label.upper(), STYLES["label"]),
+                Paragraph(esc(value), STYLES["value"])]
+
+    sig_img = signature_flowable(sig)
+    table = Table(
+        [
+            [[Paragraph("DRAWN SIGNATURE", STYLES["label"]), Spacer(1, 4), sig_img],
+             cell("Typed signature", sig.get("typed_signature"))],
+            [cell("Full legal name", sig.get("full_name")),
+             cell("Title / role", sig.get("title"))],
+            [cell("Company / firm", sig.get("company")),
+             cell("Email", sig.get("email"))],
+            [cell("Date signed (UTC)", sig.get("signed_at")),
+             cell("Document version", sig.get("doc_version"))],
+        ],
+        colWidths=[3.35 * inch, 3.25 * inch],
     )
-    label_w = 1.7 * inch
-    row_h = 22
-    c.setFont("Helvetica", 10)
-    for label, value in rows:
-        c.setFillColor(colors.HexColor("#F4F5F9"))
-        c.rect(margin, y - 6, page_w - 2 * margin, row_h - 4, stroke=0, fill=1)
-        c.setFillColor(colors.HexColor("#5A6072"))
-        c.setFont("Helvetica-Bold", 9)
-        c.drawString(margin + 8, y, label.upper())
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica", 10)
-        c.drawString(margin + label_w, y, str(value if value not in (None, "") else "—"))
-        y -= row_h
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.5, RULE),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    story.append(table)
 
-    # Drawn signature
-    y -= 18
-    c.setFillColor(colors.HexColor("#5A6072"))
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(margin, y, "DRAWN SIGNATURE")
-    y -= 8
-    box_w, box_h = 3.4 * inch, 1.3 * inch
-    png_data_url = sig.get("signature_png") or ""
-    prefix = "data:image/png;base64,"
-    c.setStrokeColor(colors.HexColor("#C9CDD8"))
-    c.rect(margin, y - box_h, box_w, box_h, stroke=1, fill=0)
-    if png_data_url.startswith(prefix):
-        png_bytes = base64.b64decode(png_data_url[len(prefix):])
-        img = ImageReader(io.BytesIO(png_bytes))
-        iw, ih = img.getSize()
-        scale = min((box_w - 12) / iw, (box_h - 12) / ih)
-        w, h = iw * scale, ih * scale
-        c.drawImage(img, margin + (box_w - w) / 2, y - box_h + (box_h - h) / 2,
-                    width=w, height=h, mask="auto")
-    else:
-        c.setFillColor(colors.HexColor("#8B92A8"))
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(margin + 10, y - box_h / 2, "(no drawn signature on record)")
-
-    # Footer
-    c.setFillColor(colors.HexColor("#8B92A8"))
-    c.setFont("Helvetica", 8)
-    c.drawString(margin, 0.6 * inch,
-                 "© 2026 Trainovate Technologies LLC — Confidential. Generated from the "
-                 "storydoc signature database.")
-    c.showPage()
-    c.save()
+    # Audit trail
+    story += [
+        Spacer(1, 14),
+        Paragraph(
+            f"Audit trail — record #{esc(sig.get('id'))} · IP {esc(sig.get('ip'))} · "
+            f"user agent: {esc(sig.get('user_agent'))}", STYLES["fine"]),
+        Spacer(1, 4),
+        Paragraph("© 2026 Trainovate Technologies LLC — Confidential. Generated from the "
+                  "storydoc signature database for Discloser's records.", STYLES["fine"]),
+    ]
+    doc.build(story)
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Email
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def send_email(pdf_path, sig, recipient):
     host = os.environ.get("SMTP_HOST")
@@ -213,7 +309,7 @@ def send_email(pdf_path, sig, recipient):
     msg["Subject"] = (f"Signed NDA — {sig.get('full_name', 'Unknown signer')} "
                       f"({sig.get('company') or 'no company'})")
     msg.set_content(
-        f"Attached is the signed JetsetterPro NDA acknowledgment.\n\n"
+        f"Attached is the fully executed JetsetterPro NDA for your records.\n\n"
         f"Signer:  {sig.get('full_name')} <{sig.get('email')}>\n"
         f"Company: {sig.get('company') or '—'} — {sig.get('title') or '—'}\n"
         f"Signed:  {sig.get('signed_at')} (UTC) · {sig.get('doc_version')}\n"
@@ -237,10 +333,10 @@ def send_email(pdf_path, sig, recipient):
         smtp.send_message(msg)
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Generate a signed-NDA PDF and email it.")
+    p = argparse.ArgumentParser(description="Generate the signed NDA as a PDF and email it.")
     p.add_argument("--id", type=int, help="signature record id (default: most recent)")
     p.add_argument("--db", default=str(DEFAULT_DB), help="path to local signatures.sqlite")
     p.add_argument("--api-url", help="deployed app base URL (pull via GET /api/nda instead of the local DB)")
